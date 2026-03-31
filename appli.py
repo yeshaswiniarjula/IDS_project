@@ -1,8 +1,9 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-from ctgan import CTGAN
+# ❌ REMOVE CTGAN (or make optional)
+# from ctgan import CTGAN
+
 from sklearn.preprocessing import LabelEncoder, RobustScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
@@ -18,26 +19,34 @@ import seaborn as sns
 # UI CONFIG
 # ===============================
 st.set_page_config(page_title="SentinelNet IDS", layout="wide")
-st.title("🔐 SentinelNet IDS with CTGAN + Ensemble")
+st.title("🔐 SentinelNet IDS (Render Optimized)")
 
 # ===============================
-# SIDEBAR SETTINGS
+# SIDEBAR SETTINGS (REDUCED RANGE ✅)
 # ===============================
 st.sidebar.header("⚙️ Settings")
 
-sample_size = st.sidebar.slider("Training Sample Size", 1000, 20000, 5000, step=1000)
-svm_sample_size = st.sidebar.slider("SVM Training Size", 1000, 10000, 5000, step=1000)
-pca_components = st.sidebar.slider("PCA Components", 5, 50, 20)
-test_sample_size = st.sidebar.slider("Test Sample Size", 1000, 20000, 5000, step=1000)
+sample_size = st.sidebar.slider("Training Sample Size", 200, 2000, 1000, step=200)
+svm_sample_size = st.sidebar.slider("SVM Training Size", 200, 2000, 1000, step=200)
+pca_components = st.sidebar.slider("PCA Components", 5, 20, 10)
+test_sample_size = st.sidebar.slider("Test Sample Size", 200, 2000, 1000, step=200)
+
+# ===============================
+# CACHE DATA (IMPORTANT ✅)
+# ===============================
+@st.cache_data
+def load_data():
+    train = pd.read_parquet("KDDTrain.parquet")
+    test = pd.read_parquet("KDDTest.parquet")
+    return train, test
 
 # ===============================
 # BUTTON
 # ===============================
 if st.button("🚀 Run Detection"):
 
-    # LOAD DATA
-    train = pd.read_parquet("KDDTrain.parquet")
-    test  = pd.read_parquet("KDDTest.parquet")
+    with st.spinner("⏳ Loading data..."):
+        train, test = load_data()
 
     test = test.sample(min(test_sample_size, len(test)), random_state=42)
 
@@ -49,8 +58,10 @@ if st.button("🚀 Run Detection"):
     st.write(f"Actual Attacks: {y_test.sum()}")
 
     # ===============================
-    # CTGAN TRAINING
+    # ⚠️ SKIP CTGAN (REPLACED WITH NORMAL DATA)
     # ===============================
+    st.subheader("⚡ Using Real Data (CTGAN Skipped for Render)")
+
     normal_data = train[train["class"].str.lower().str.strip() == "normal"].copy()
     normal_data = normal_data.drop(columns=["class", "classnum"], errors="ignore")
 
@@ -59,31 +70,13 @@ if st.button("🚀 Run Detection"):
         normal_data[col] = le.fit_transform(normal_data[col].astype(str))
 
     normal_data = normal_data.astype(np.float32)
-
     train_sample = normal_data.sample(min(sample_size, len(normal_data)), random_state=42)
-
-    st.subheader("🤖 Training CTGAN...")
-    ctgan = CTGAN(epochs=5, verbose=True)
-    ctgan.fit(train_sample, cat_cols)
-
-    # ===============================
-    # SYNTHETIC DATA
-    # ===============================
-    st.subheader("🧪 Generating Synthetic Data")
-    synth = ctgan.sample(sample_size).astype(np.float32)
-
-    for col in synth.columns:
-        if col not in cat_cols:
-            synth[col] = synth[col].clip(lower=0)
-
-    synth["class"] = "normal"
-    st.success("✅ Synthetic Data Generated")
 
     # ===============================
     # PREPARE DATA
     # ===============================
     def prepare(train_df, test_df):
-        X_tr = train_df.drop(columns=["class"], errors="ignore")
+        X_tr = train_df.copy()
         X_te = test_df.drop(columns=["class"], errors="ignore")
 
         X_tr = pd.get_dummies(X_tr, columns=cat_cols)
@@ -101,20 +94,21 @@ if st.button("🚀 Run Detection"):
 
         return X_tr_sc, X_te_sc, X_tr_pca, X_te_pca
 
-    X_tr_sc, X_te_sc, X_tr_pca, X_te_pca = prepare(synth, test)
+    with st.spinner("⚙️ Preparing data..."):
+        X_tr_sc, X_te_sc, X_tr_pca, X_te_pca = prepare(train_sample, test)
 
     # ===============================
-    # MODELS
+    # MODELS (LIGHTER ✅)
     # ===============================
-    st.subheader("🔍 Running Ensemble Detection")
+    st.subheader("🔍 Running Detection")
 
-    iso = IsolationForest(contamination=0.1, n_estimators=150, random_state=42)
+    iso = IsolationForest(contamination=0.1, n_estimators=100, random_state=42)
     iso.fit(X_tr_sc)
 
     svm = OneClassSVM(nu=0.1)
     svm.fit(X_tr_sc[:svm_sample_size])
 
-    lof = LocalOutlierFactor(n_neighbors=30, novelty=True)
+    lof = LocalOutlierFactor(n_neighbors=20, novelty=True)
     lof.fit(X_tr_pca)
 
     # ===============================
@@ -127,19 +121,19 @@ if st.button("🚀 Run Detection"):
     def normalize(x):
         return (x - x.min()) / (x.max() - x.min() + 1e-9)
 
-    iso_n = normalize(iso_scores)
-    svm_n = normalize(svm_scores)
-    lof_n = normalize(lof_scores)
-
-    ens_scores = 0.4 * iso_n + 0.3 * svm_n + 0.3 * lof_n
+    ens_scores = (
+        0.4 * normalize(iso_scores) +
+        0.3 * normalize(svm_scores) +
+        0.3 * normalize(lof_scores)
+    )
 
     # ===============================
-    # AUTO THRESHOLD
+    # THRESHOLD
     # ===============================
     best_t = 0.5
     best_f1 = 0
 
-    for t in np.linspace(0.1, 0.9, 40):
+    for t in np.linspace(0.2, 0.8, 20):  # reduced loop
         preds = (ens_scores >= t).astype(int)
         f1 = f1_score(y_test, preds)
         if f1 > best_f1:
@@ -153,65 +147,20 @@ if st.button("🚀 Run Detection"):
     # ===============================
     # METRICS
     # ===============================
-    st.subheader("📊 Performance Dashboard")
-
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred)
-    rec = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
+    st.subheader("📊 Performance")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Accuracy", f"{acc:.2f}")
-    c2.metric("Precision", f"{prec:.2f}")
-    c3.metric("Recall", f"{rec:.2f}")
-    c4.metric("F1 Score", f"{f1:.2f}")
+    c1.metric("Accuracy", f"{accuracy_score(y_test, y_pred):.2f}")
+    c2.metric("Precision", f"{precision_score(y_test, y_pred):.2f}")
+    c3.metric("Recall", f"{recall_score(y_test, y_pred):.2f}")
+    c4.metric("F1 Score", f"{f1_score(y_test, y_pred):.2f}")
 
     # ===============================
-    # CONFUSION MATRIX
+    # ALERT
     # ===============================
-    st.markdown("### 🔍 Confusion Matrix")
-
-    cm = confusion_matrix(y_test, y_pred)
-
-    fig_cm, ax_cm = plt.subplots()
-    sns.heatmap(cm, annot=True, fmt='d',
-                xticklabels=["Normal", "Attack"],
-                yticklabels=["Normal", "Attack"])
-    ax_cm.set_xlabel("Predicted")
-    ax_cm.set_ylabel("Actual")
-
-    st.pyplot(fig_cm)
-
-    # ===============================
-    # ALERT SYSTEM (FIXED ✅)
-    # ===============================
-    st.subheader("🚨 Live Alert System")
-
     if (y_pred == 1).any():
-
-        alert_html = """
-        <div style="background-color:red;padding:20px;border-radius:10px">
-            <h2 style="color:white;text-align:center;">
-                🚨 INTRUSION DETECTED 🚨
-            </h2>
-        </div>
-        """
-
-        st.markdown(alert_html, unsafe_allow_html=True)
-
-        st.error("⚠️ Malicious Activity Detected!")
-
-        attack_count = (y_pred == 1).sum()
-        st.warning(f"🔴 {attack_count} suspicious activities found!")
-
+        st.error("🚨 Intrusion Detected!")
     else:
-        st.success("✅ No malicious activity detected.")
+        st.success("✅ Safe Traffic")
 
-    # SAVE FILE
-    results_df = test.copy()
-    results_df["Actual"] = y_test
-    results_df["Predicted"] = y_pred
-
-    results_df.to_csv("final_attack_predictions.csv", index=False)
-
-    st.success("✅ Detection Completed & File Saved!")
+    st.success("✅ Detection Completed!")
