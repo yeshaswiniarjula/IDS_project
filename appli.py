@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# ❌ REMOVE CTGAN (or make optional)
-# from ctgan import CTGAN
 
 from sklearn.preprocessing import LabelEncoder, RobustScaler
 from sklearn.ensemble import IsolationForest
@@ -19,10 +17,10 @@ import seaborn as sns
 # UI CONFIG
 # ===============================
 st.set_page_config(page_title="SentinelNet IDS", layout="wide")
-st.title("🔐 SentinelNet IDS (Render Optimized)")
+st.title("🔐 SentinelNet IDS (Smart Deployment Version)")
 
 # ===============================
-# SIDEBAR SETTINGS (REDUCED RANGE ✅)
+# SIDEBAR SETTINGS
 # ===============================
 st.sidebar.header("⚙️ Settings")
 
@@ -31,8 +29,11 @@ svm_sample_size = st.sidebar.slider("SVM Training Size", 200, 2000, 1000, step=2
 pca_components = st.sidebar.slider("PCA Components", 5, 20, 10)
 test_sample_size = st.sidebar.slider("Test Sample Size", 200, 2000, 1000, step=200)
 
+# ✅ NEW: CTGAN TOGGLE
+use_ctgan = st.sidebar.checkbox("Use CTGAN Synthetic Data", value=True)
+
 # ===============================
-# CACHE DATA (IMPORTANT ✅)
+# LOAD DATA
 # ===============================
 @st.cache_data
 def load_data():
@@ -58,19 +59,31 @@ if st.button("🚀 Run Detection"):
     st.write(f"Actual Attacks: {y_test.sum()}")
 
     # ===============================
-    # ⚠️ SKIP CTGAN (REPLACED WITH NORMAL DATA)
+    # DATA SOURCE SELECTION
     # ===============================
-    st.subheader("⚡ Using Real Data (CTGAN Skipped for Render)")
+    if use_ctgan:
+        st.subheader("🧪 Using Pre-Generated CTGAN Data")
 
-    normal_data = train[train["class"].str.lower().str.strip() == "normal"].copy()
-    normal_data = normal_data.drop(columns=["class", "classnum"], errors="ignore")
+        try:
+            synth = pd.read_csv("ctgan_synthetic_data.csv")
+            train_sample = synth.sample(min(sample_size, len(synth)), random_state=42)
 
-    for col in cat_cols:
-        le = LabelEncoder()
-        normal_data[col] = le.fit_transform(normal_data[col].astype(str))
+        except:
+            st.error("❌ CTGAN file not found! Using real data instead.")
+            use_ctgan = False
 
-    normal_data = normal_data.astype(np.float32)
-    train_sample = normal_data.sample(min(sample_size, len(normal_data)), random_state=42)
+    if not use_ctgan:
+        st.subheader("⚡ Using Real Normal Data")
+
+        normal_data = train[train["class"].str.lower().str.strip() == "normal"].copy()
+        normal_data = normal_data.drop(columns=["class", "classnum"], errors="ignore")
+
+        for col in cat_cols:
+            le = LabelEncoder()
+            normal_data[col] = le.fit_transform(normal_data[col].astype(str))
+
+        normal_data = normal_data.astype(np.float32)
+        train_sample = normal_data.sample(min(sample_size, len(normal_data)), random_state=42)
 
     # ===============================
     # PREPARE DATA
@@ -98,7 +111,7 @@ if st.button("🚀 Run Detection"):
         X_tr_sc, X_te_sc, X_tr_pca, X_te_pca = prepare(train_sample, test)
 
     # ===============================
-    # MODELS (LIGHTER ✅)
+    # MODELS
     # ===============================
     st.subheader("🔍 Running Detection")
 
@@ -133,7 +146,7 @@ if st.button("🚀 Run Detection"):
     best_t = 0.5
     best_f1 = 0
 
-    for t in np.linspace(0.2, 0.8, 20):  # reduced loop
+    for t in np.linspace(0.2, 0.8, 20):
         preds = (ens_scores >= t).astype(int)
         f1 = f1_score(y_test, preds)
         if f1 > best_f1:
@@ -149,18 +162,53 @@ if st.button("🚀 Run Detection"):
     # ===============================
     st.subheader("📊 Performance")
 
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Accuracy", f"{accuracy_score(y_test, y_pred):.2f}")
-    c2.metric("Precision", f"{precision_score(y_test, y_pred):.2f}")
-    c3.metric("Recall", f"{recall_score(y_test, y_pred):.2f}")
-    c4.metric("F1 Score", f"{f1_score(y_test, y_pred):.2f}")
+    c1.metric("Accuracy", f"{acc:.2f}")
+    c2.metric("Precision", f"{prec:.2f}")
+    c3.metric("Recall", f"{rec:.2f}")
+    c4.metric("F1 Score", f"{f1:.2f}")
 
     # ===============================
-    # ALERT
+    # CONFUSION MATRIX HEATMAP
     # ===============================
-    if (y_pred == 1).any():
-        st.error("🚨 Intrusion Detected!")
+    st.subheader("🔍 Confusion Matrix")
+
+    cm = confusion_matrix(y_test, y_pred)
+
+    fig_cm, ax_cm = plt.subplots()
+    sns.heatmap(cm, annot=True, fmt='d',
+                xticklabels=["Normal", "Attack"],
+                yticklabels=["Normal", "Attack"])
+    ax_cm.set_xlabel("Predicted")
+    ax_cm.set_ylabel("Actual")
+
+    st.pyplot(fig_cm)
+
+    # ===============================
+    # BAR GRAPH (NEW ✅)
+    # ===============================
+    st.subheader("📊 Prediction Distribution")
+
+    normal_count = (y_pred == 0).sum()
+    attack_count = (y_pred == 1).sum()
+
+    fig_bar, ax_bar = plt.subplots()
+    ax_bar.bar(["Normal", "Attack"], [normal_count, attack_count])
+    ax_bar.set_ylabel("Count")
+
+    st.pyplot(fig_bar)
+
+    # ===============================
+    # ALERT SYSTEM
+    # ===============================
+    if attack_count > 0:
+        st.error(f"🚨 {attack_count} Intrusions Detected!")
     else:
-        st.success("✅ Safe Traffic")
+        st.success("✅ No Intrusions Detected")
 
     st.success("✅ Detection Completed!")
